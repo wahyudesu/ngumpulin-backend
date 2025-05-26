@@ -1,0 +1,25 @@
+[project]
+name = "ngumpulin-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11.12"
+dependencies = [
+    "fastapi[standard]>=0.115.12",
+    "gliner>=0.2.20",
+    "langchain>=0.3.25",
+    "langchain-community>=0.3.24",
+    "langchain-groq>=0.3.2",
+    "langchain-pinecone>=0.2.6",
+    "langgraph>=0.4.7",
+    "mlflow>=2.22.0",
+    "numpy>=2.2.6",
+    "pandas>=2.2.3",
+    "scikit-learn>=1.6.1",
+    "supabase>=2.13.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]
