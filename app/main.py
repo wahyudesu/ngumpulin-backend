@@ -2,10 +2,8 @@ import os
 import re
 import json
 import numpy as np
-from typing import Union
 from fastapi import FastAPI, HTTPException, Form
-from pydantic import BaseModel
-from supabase import create_client, Client
+from supabase import create_client
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_pinecone import PineconeEmbeddings
@@ -15,7 +13,6 @@ from dotenv import load_dotenv
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
 from routers.agent import generate_feedback, AssignmentRequest
-import uvicorn
 
 import pickle
 from sklearn.preprocessing import StandardScaler
@@ -23,6 +20,9 @@ import pandas as pd
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
+
+import logging
+logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 
@@ -170,12 +170,6 @@ async def upload_file(uuid: str = Form(...), file_url: str = Form(...)):
 #     assignment_content: str
 
 # Route baru untuk memproses feedback assignment
-
-from routers.agent import generate_feedback, AssignmentRequest
-
-from fastapi import Form, HTTPException
-import logging
-logging.basicConfig(level=logging.INFO)
 
 @app.post("/agent-feedback")
 async def agent_feedback_endpoint(uuid: str = Form(...)):
