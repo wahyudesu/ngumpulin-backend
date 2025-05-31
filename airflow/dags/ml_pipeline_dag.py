@@ -68,14 +68,13 @@ create_experiment = MLflowExperimentOperator(
     task_id='create_experiment',
     mlflow_tracking_uri=MLFLOW_TRACKING_URI,
     experiment_name=EXPERIMENT_NAME,
-    experiment_id=experiment_id,  # Pass the experiment_id
     dag=dag
 )
 
 def extract_data(**context):
     """Extract data from Supabase and save as CSV."""
     try:
-        with mlflow.start_run(run_name="data_extraction", experiment_id=experiment_id):
+        with mlflow.start_run(run_name="data_extraction", experiment_id=experiment_id, nested=True):
             supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
             table_name = "documents"
             response = supabase.table(table_name).select("*").execute()
@@ -110,7 +109,7 @@ def extract_data(**context):
 def validate_data(**context):
     """Validate data before processing."""
     try:
-        with mlflow.start_run(run_name="data_validation", experiment_id=experiment_id):
+        with mlflow.start_run(run_name="data_validation", experiment_id=experiment_id, nested=True):
             in_path = context['ti'].xcom_pull(task_ids='extract_data')
             df = pd.read_csv(in_path)
             
@@ -143,7 +142,7 @@ def validate_data(**context):
 def preprocess_data(**context):
     """Preprocess the extracted data and save as CSV."""
     try:
-        with mlflow.start_run(run_name="data_preprocessing", experiment_id=experiment_id):
+        with mlflow.start_run(run_name="data_preprocessing", experiment_id=experiment_id, nested=True):
             in_path = context['ti'].xcom_pull(task_ids='extract_data')
             df = pd.read_csv(in_path)
             
@@ -280,7 +279,7 @@ def preprocess_data(**context):
 def train_model(**context):
     """Run clustering, optimize with Optuna, and save model."""
     try:
-        with mlflow.start_run(run_name="model_training", experiment_id=experiment_id):
+        with mlflow.start_run(run_name="model_training", experiment_id=experiment_id, nested=True):
             weighted_path = context['ti'].xcom_pull(task_ids='preprocess_data')
             X_weight = pd.read_csv(weighted_path)
             
@@ -411,7 +410,7 @@ def train_model(**context):
 def evaluate_model(**context):
     """Evaluate model performance and log metrics to MLflow."""
     try:
-        with mlflow.start_run(run_name="model_evaluation", experiment_id=experiment_id):
+        with mlflow.start_run(run_name="model_evaluation", experiment_id=experiment_id, nested=True):
             # Load model from MLflow
             model = mlflow.sklearn.load_model("/tmp/model")
             
@@ -454,11 +453,11 @@ def evaluate_model(**context):
 def monitor_model_performance(**context):
     """Monitor model performance and alert if degradation detected."""
     try:
-        with mlflow.start_run(run_name="performance_monitoring", experiment_id=experiment_id):
+        with mlflow.start_run(run_name="performance_monitoring", experiment_id=experiment_id, nested=True):
             # Get the latest model metrics
             client = mlflow.tracking.MlflowClient()
             runs = client.search_runs(
-                experiment_ids=[mlflow.get_experiment_by_name(EXPERIMENT_NAME).experiment_id],
+                experiment_ids=[experiment_id],
                 filter_string="tags.mlflow.runName = 'model_evaluation'",
                 max_results=2
             )
@@ -563,6 +562,15 @@ train_task = PythonOperator(
     dag=dag,
 )
 
+# Register model using MLflow plugin operator
+register_model = MLflowModelOperator(
+    task_id='register_model',
+    mlflow_tracking_uri=MLFLOW_TRACKING_URI,
+    model_path="/tmp/model",  # Path to the MLflow model directory
+    model_name=MODEL_NAME,
+    dag=dag
+)
+
 evaluate_task = PythonOperator(
     task_id='evaluate_model',
     python_callable=evaluate_model,
@@ -579,15 +587,6 @@ deploy_task = PythonOperator(
     task_id='deploy_model',
     python_callable=deploy_model,
     dag=dag,
-)
-
-# Register model using MLflow plugin operator
-register_model = MLflowModelOperator(
-    task_id='register_model',
-    mlflow_tracking_uri=MLFLOW_TRACKING_URI,
-    model_path="/tmp/model",  # Path to the MLflow model directory
-    model_name=MODEL_NAME,
-    dag=dag
 )
 
 # Set task dependencies
