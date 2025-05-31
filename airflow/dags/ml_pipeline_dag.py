@@ -30,6 +30,15 @@ MLFLOW_TRACKING_URI = "http://mlflow:5000"
 EXPERIMENT_NAME = "document-processing"
 MODEL_NAME = "document-clustering"
 
+# Initialize MLflow experiment
+mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+experiment = mlflow.get_experiment_by_name(EXPERIMENT_NAME)
+if experiment is None:
+    experiment_id = mlflow.create_experiment(EXPERIMENT_NAME)
+else:
+    experiment_id = experiment.experiment_id
+mlflow.set_experiment(experiment_id=experiment_id)
+
 default_args = {
     'owner': 'ngumpulin',
     'depends_on_past': False,
@@ -59,21 +68,34 @@ create_experiment = MLflowExperimentOperator(
     task_id='create_experiment',
     mlflow_tracking_uri=MLFLOW_TRACKING_URI,
     experiment_name=EXPERIMENT_NAME,
+    experiment_id=experiment_id,  # Pass the experiment_id
     dag=dag
 )
 
 def extract_data(**context):
     """Extract data from Supabase and save as CSV."""
     try:
-        with mlflow.start_run(run_name="data_extraction"):
+        with mlflow.start_run(run_name="data_extraction", experiment_id=experiment_id):
             supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
             table_name = "documents"
             response = supabase.table(table_name).select("*").execute()
             df = pd.DataFrame(response.data)
             
-            # Log data statistics
-            mlflow.log_metric("total_documents", len(df))
-            mlflow.log_metric("total_sentences", df['sentences'].sum())
+            # Convert sentences to numeric if it's not already
+            df['sentences'] = pd.to_numeric(df['sentences'], errors='coerce')
+            df['page'] = pd.to_numeric(df['page'], errors='coerce')
+            
+            # Calculate metrics
+            total_docs = int(len(df))
+            total_sentences = int(df['sentences'].sum())
+            avg_sentences = float(df['sentences'].mean())
+            avg_pages = float(df['page'].mean())
+            
+            # Log metrics
+            mlflow.log_metric("total_documents", total_docs)
+            mlflow.log_metric("total_sentences", total_sentences)
+            mlflow.log_metric("avg_sentences", avg_sentences)
+            mlflow.log_metric("avg_pages", avg_pages)
             
             out_path = "/tmp/extracted_data.csv"
             df.to_csv(out_path, index=False)
@@ -88,11 +110,11 @@ def extract_data(**context):
 def validate_data(**context):
     """Validate data before processing."""
     try:
-        with mlflow.start_run(run_name="data_validation"):
+        with mlflow.start_run(run_name="data_validation", experiment_id=experiment_id):
             in_path = context['ti'].xcom_pull(task_ids='extract_data')
             df = pd.read_csv(in_path)
             
-            required_columns = ['sentences', 'page', 'timing', 'plagiarism']
+            required_columns = ['sentences', 'page', 'deadline', 'uploadedDate', 'plagiarism']
             missing_columns = [col for col in required_columns if col not in df.columns]
             
             if missing_columns:
@@ -100,16 +122,18 @@ def validate_data(**context):
                 
             # Check for null values
             null_counts = df[required_columns].isnull().sum()
+            total_nulls = int(null_counts.sum())
+            
             if null_counts.any():
                 logger.warning(f"Found null values: {null_counts[null_counts > 0]}")
-                mlflow.log_metric("null_values_count", null_counts.sum())
+                mlflow.log_metric("null_values_count", total_nulls)
                 
             # Check data types
             if not all(df['sentences'].apply(lambda x: isinstance(x, (int, float)))):
                 raise ValueError("'sentences' column must be numeric")
                 
             # Log validation metrics
-            mlflow.log_metric("validation_passed", 1)
+            mlflow.log_metric("validation_passed", 1.0)
             logger.info("Data validation completed successfully")
             return True
     except Exception as e:
@@ -119,29 +143,101 @@ def validate_data(**context):
 def preprocess_data(**context):
     """Preprocess the extracted data and save as CSV."""
     try:
-        with mlflow.start_run(run_name="data_preprocessing"):
+        with mlflow.start_run(run_name="data_preprocessing", experiment_id=experiment_id):
             in_path = context['ti'].xcom_pull(task_ids='extract_data')
             df = pd.read_csv(in_path)
             
             # Date conversion and feature engineering
             df['deadline'] = pd.to_datetime(df['deadline'])
             df['uploadedDate'] = pd.to_datetime(df['uploadedDate'])
+            
+            # Calculate timing with proper handling of NA and inf values
             df['timing'] = (df['deadline'] - df['uploadedDate']).dt.total_seconds() / 3600
+            # Replace inf with NA
+            df['timing'] = df['timing'].replace([np.inf, -np.inf], np.nan)
+            
+            # Handle NaN values in all numeric columns
+            numeric_columns = ['sentences', 'page', 'timing']
+            for col in numeric_columns:
+                if col in df.columns:
+                    # Fill NaN with median for each column
+                    median_value = float(df[col].median())
+                    df[col] = df[col].fillna(median_value)
+                    # Log the median value used for imputation
+                    mlflow.log_metric(f"{col}_median_imputation", median_value)
+            
+            # Convert timing to integer after handling NaN
             df['timing'] = df['timing'].astype(int)
             
-            # Plagiarism value
-            import ast
+            # Plagiarism value extraction with better error handling
             def extract_plagiarism(row):
                 try:
+                    # Handle empty string or None
+                    if pd.isna(row) or row == '[]' or row == '':
+                        return 0.0
+                    
+                    # Handle string representation of list/dict
                     if isinstance(row, str):
-                        row = ast.literal_eval(row)
-                    return round(max([v for item in row for v in item.values()]) * 100, 2) if row else 0
-                except Exception:
-                    return 0
+                        # Clean the string if needed
+                        row = row.strip()
+                        if row.startswith('[') and row.endswith(']'):
+                            row = row[1:-1]  # Remove brackets
+                        if row.startswith('{') and row.endswith('}'):
+                            row = row[1:-1]  # Remove braces
+                        
+                        # Parse the string into a list of dictionaries
+                        try:
+                            # Handle multiple dictionaries
+                            if ',' in row:
+                                items = row.split('}, {')
+                                items = [item.strip('{}') for item in items]
+                                max_value = 0.0
+                                for item in items:
+                                    # Parse each dictionary
+                                    pairs = item.split(',')
+                                    for pair in pairs:
+                                        if ':' in pair:
+                                            key, value = pair.split(':')
+                                            value = float(value.strip())
+                                            max_value = max(max_value, value)
+                                return round(max_value * 100, 2)
+                            else:
+                                # Handle single dictionary
+                                pairs = row.split(',')
+                                max_value = 0.0
+                                for pair in pairs:
+                                    if ':' in pair:
+                                        key, value = pair.split(':')
+                                        value = float(value.strip())
+                                        max_value = max(max_value, value)
+                                return round(max_value * 100, 2)
+                        except Exception as e:
+                            logger.warning(f"Error parsing plagiarism value: {str(e)}")
+                            return 0.0
+                    
+                    # Handle list/dict directly
+                    if isinstance(row, (list, dict)):
+                        if isinstance(row, list):
+                            values = [v for item in row for v in item.values()]
+                        else:
+                            values = list(row.values())
+                        return round(max(values) * 100, 2) if values else 0.0
+                    
+                    return 0.0
+                except Exception as e:
+                    logger.warning(f"Error in extract_plagiarism: {str(e)}")
+                    return 0.0
+            
+            # Apply plagiarism extraction and handle any remaining NaN
             df['plagiarism'] = df['plagiarism'].apply(extract_plagiarism)
+            df['plagiarism'] = df['plagiarism'].fillna(0.0)
             
             # Select features
             data = df[['sentences', 'page', 'timing', 'plagiarism']]
+            
+            # Verify no NaN values remain
+            if data.isna().any().any():
+                raise ValueError("NaN values still present after preprocessing")
             
             # Scaling
             scaler = MinMaxScaler()
@@ -149,7 +245,7 @@ def preprocess_data(**context):
             X_scaled = pd.DataFrame(X_scaled, columns=data.columns)
             
             # Weighting
-            weights = np.array([0.5, 0.5, 1.5, 4.5])
+            weights = np.array([0.5, 0.5, 1.5, 4.5])  # Using the best weights from notebook
             X_weight = X_scaled * weights
             X_weight = pd.DataFrame(X_weight, columns=data.columns)
             
@@ -165,8 +261,15 @@ def preprocess_data(**context):
             mlflow.log_artifact(weighted_path, "preprocessing")
             
             # Log preprocessing metrics
-            mlflow.log_metric("preprocessed_samples", len(X_weight))
+            mlflow.log_metric("preprocessed_samples", int(len(X_weight)))
             mlflow.log_param("feature_weights", weights.tolist())
+            
+            # Log feature statistics
+            for col in data.columns:
+                mlflow.log_metric(f"{col}_mean", float(data[col].mean()))
+                mlflow.log_metric(f"{col}_std", float(data[col].std()))
+                mlflow.log_metric(f"{col}_min", float(data[col].min()))
+                mlflow.log_metric(f"{col}_max", float(data[col].max()))
             
             logger.info("Data preprocessing completed successfully")
             return weighted_path
@@ -177,7 +280,7 @@ def preprocess_data(**context):
 def train_model(**context):
     """Run clustering, optimize with Optuna, and save model."""
     try:
-        with mlflow.start_run(run_name="model_training"):
+        with mlflow.start_run(run_name="model_training", experiment_id=experiment_id):
             weighted_path = context['ti'].xcom_pull(task_ids='preprocess_data')
             X_weight = pd.read_csv(weighted_path)
             
@@ -187,7 +290,7 @@ def train_model(**context):
                 init_method = trial.suggest_categorical('init', ['k-means++', 'random'])
                 n_init = trial.suggest_int('n_init', 1, 10)
                 max_iter = trial.suggest_int('max_iter', 100, 1000)
-                algorithm = trial.suggest_categorical('algorithm', ['auto', 'full', 'elkan'])
+                algorithm = trial.suggest_categorical('algorithm', ['lloyd', 'elkan'])
                 random_state = trial.suggest_int('random_state', 0, 1000)
                 
                 model = KMeans(
@@ -204,7 +307,7 @@ def train_model(**context):
                     if len(set(labels)) <= 1:
                         return -1.0
                     score = silhouette_score(X_weight, labels)
-                    return score
+                    return float(score)
                 except Exception:
                     return -1.0
                     
@@ -228,7 +331,7 @@ def train_model(**context):
                     if len(set(labels)) <= 1:
                         return -1.0
                     score = silhouette_score(X_weight, labels)
-                    return score
+                    return float(score)
                 except Exception:
                     return -1.0
                     
@@ -249,7 +352,7 @@ def train_model(**context):
                     labels = model.fit_predict(X_weight)
                     if len(set(labels)) <= 1:
                         return -1.0
-                    return silhouette_score(X_weight, labels)
+                    return float(silhouette_score(X_weight, labels))
                 except Exception:
                     return -1.0
                     
@@ -266,12 +369,16 @@ def train_model(**context):
             for algo_name, objective in algorithms.items():
                 study = optuna.create_study(direction='maximize')
                 study.optimize(objective, n_trials=n_trials)
-                results[algo_name] = study.best_value
+                results[algo_name] = float(study.best_value)
                 best_params[algo_name] = study.best_params
                 
                 # Log Optuna results
-                mlflow.log_metric(f"{algo_name}_best_score", study.best_value)
-                mlflow.log_params({f"{algo_name}_{k}": v for k, v in study.best_params.items()})
+                mlflow.log_metric(f"{algo_name}_best_score", float(study.best_value))
+                for param_name, param_value in study.best_params.items():
+                    if isinstance(param_value, (int, float)):
+                        mlflow.log_metric(f"{algo_name}_{param_name}", float(param_value))
+                    else:
+                        mlflow.log_param(f"{algo_name}_{param_name}", param_value)
                 
             # Model selection
             best_algo = max(results, key=lambda x: results[x])
@@ -286,14 +393,14 @@ def train_model(**context):
                 
             model.fit(X_weight)
             
-            # Save model
-            model_path = "/tmp/best_model.pkl"
-            with open(model_path, 'wb') as f:
-                pickle.dump(model, f)
+            # Save model using MLflow
+            model_path = "/tmp/model"
+            os.makedirs(model_path, exist_ok=True)
+            mlflow.sklearn.save_model(model, model_path)
             
             # Log training metrics
-            mlflow.log_metric("best_algorithm", best_algo)
-            mlflow.log_metric("best_silhouette_score", results[best_algo])
+            mlflow.log_param("best_algorithm", best_algo)
+            mlflow.log_metric("best_silhouette_score", float(results[best_algo]))
             
             logger.info(f"Model training completed successfully. Best algorithm: {best_algo}")
             return model_path
@@ -304,19 +411,23 @@ def train_model(**context):
 def evaluate_model(**context):
     """Evaluate model performance and log metrics to MLflow."""
     try:
-        with mlflow.start_run(run_name="model_evaluation"):
-            # Load the latest model from MLflow
-            model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}/Production")
+        with mlflow.start_run(run_name="model_evaluation", experiment_id=experiment_id):
+            # Load model from MLflow
+            model = mlflow.sklearn.load_model("/tmp/model")
+            
             weighted_path = context['ti'].xcom_pull(task_ids='preprocess_data')
+            if not os.path.exists(weighted_path):
+                raise FileNotFoundError(f"Preprocessed data file not found at {weighted_path}")
+                
             X_weight = pd.read_csv(weighted_path)
             
             # Make predictions
             labels = model.predict(X_weight)
             
             # Calculate metrics
-            silhouette = silhouette_score(X_weight, labels)
-            calinski = calinski_harabasz_score(X_weight, labels)
-            davies = davies_bouldin_score(X_weight, labels)
+            silhouette = float(silhouette_score(X_weight, labels))
+            calinski = float(calinski_harabasz_score(X_weight, labels))
+            davies = float(davies_bouldin_score(X_weight, labels))
             
             # Log metrics to MLflow
             mlflow.log_metric("silhouette_score", silhouette)
@@ -326,7 +437,13 @@ def evaluate_model(**context):
             # Log cluster statistics
             cluster_sizes = pd.Series(labels).value_counts()
             for cluster, size in cluster_sizes.items():
-                mlflow.log_metric(f"cluster_{cluster}_size", size)
+                mlflow.log_metric(f"cluster_{int(cluster)}_size", int(size))
+            
+            # Log model parameters
+            if hasattr(model, 'n_clusters'):
+                mlflow.log_param("n_clusters", int(model.n_clusters))
+            if hasattr(model, 'n_components'):
+                mlflow.log_param("n_components", int(model.n_components))
             
             logger.info(f"Model evaluation - Silhouette: {silhouette:.4f}, Calinski: {calinski:.4f}, Davies: {davies:.4f}")
             return True
@@ -337,33 +454,37 @@ def evaluate_model(**context):
 def monitor_model_performance(**context):
     """Monitor model performance and alert if degradation detected."""
     try:
-        with mlflow.start_run(run_name="performance_monitoring"):
+        with mlflow.start_run(run_name="performance_monitoring", experiment_id=experiment_id):
             # Get the latest model metrics
             client = mlflow.tracking.MlflowClient()
-            latest_run = client.search_runs(
-                experiment_ids=[mlflow.get_experiment_by_name(EXPERIMENT_NAME).experiment_id],
-                filter_string="tags.mlflow.runName = 'model_evaluation'",
-                max_results=1
-            )[0]
-            
-            current_metrics = {
-                'silhouette': latest_run.data.metrics['silhouette_score'],
-                'calinski': latest_run.data.metrics['calinski_harabasz_score'],
-                'davies': latest_run.data.metrics['davies_bouldin_score']
-            }
-            
-            # Get previous metrics
-            previous_runs = client.search_runs(
+            runs = client.search_runs(
                 experiment_ids=[mlflow.get_experiment_by_name(EXPERIMENT_NAME).experiment_id],
                 filter_string="tags.mlflow.runName = 'model_evaluation'",
                 max_results=2
             )
             
-            if len(previous_runs) > 1:
+            if not runs:
+                logger.warning("No model evaluation runs found. Skipping performance monitoring.")
+                mlflow.log_metric("monitoring_skipped", 1.0)
+                return True
+                
+            latest_run = runs[0]
+            current_metrics = {
+                'silhouette': float(latest_run.data.metrics['silhouette_score']),
+                'calinski': float(latest_run.data.metrics['calinski_harabasz_score']),
+                'davies': float(latest_run.data.metrics['davies_bouldin_score'])
+            }
+            
+            # Log current metrics
+            for metric, value in current_metrics.items():
+                mlflow.log_metric(f"current_{metric}", value)
+            
+            # Only compare with previous run if it exists
+            if len(runs) > 1:
                 previous_metrics = {
-                    'silhouette': previous_runs[1].data.metrics['silhouette_score'],
-                    'calinski': previous_runs[1].data.metrics['calinski_harabasz_score'],
-                    'davies': previous_runs[1].data.metrics['davies_bouldin_score']
+                    'silhouette': float(runs[1].data.metrics['silhouette_score']),
+                    'calinski': float(runs[1].data.metrics['calinski_harabasz_score']),
+                    'davies': float(runs[1].data.metrics['davies_bouldin_score'])
                 }
                 
                 # Check for significant degradation
@@ -371,9 +492,12 @@ def monitor_model_performance(**context):
                 for metric in current_metrics:
                     if current_metrics[metric] < previous_metrics[metric] * (1 - threshold):
                         logger.warning(f"Significant degradation detected in {metric}")
-                        mlflow.log_metric(f"{metric}_degradation", 1)
+                        mlflow.log_metric(f"{metric}_degradation", 1.0)
                     else:
-                        mlflow.log_metric(f"{metric}_degradation", 0)
+                        mlflow.log_metric(f"{metric}_degradation", 0.0)
+            else:
+                logger.info("No previous run found for comparison. This is the first evaluation.")
+                mlflow.log_metric("first_evaluation", 1.0)
             
             logger.info("Model performance monitoring completed")
             return True
@@ -384,12 +508,30 @@ def monitor_model_performance(**context):
 def deploy_model(**context):
     """Deploy the best model."""
     try:
-        model_path = context['ti'].xcom_pull(task_ids='train_model')
+        # Use the MLflow model directory
+        model_path = "/tmp/model"
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model directory not found at {model_path}")
+            
         # Copy model to production location
-        prod_path = "/app/models/best_model.pkl"
-        os.makedirs(os.path.dirname(prod_path), exist_ok=True)
-        with open(model_path, 'rb') as src, open(prod_path, 'wb') as dst:
-            dst.write(src.read())
+        prod_path = "/app/models"
+        os.makedirs(prod_path, exist_ok=True)
+        
+        # Copy the entire model directory
+        for item in os.listdir(model_path):
+            s = os.path.join(model_path, item)
+            d = os.path.join(prod_path, item)
+            if os.path.isfile(s):
+                with open(s, 'rb') as src, open(d, 'wb') as dst:
+                    dst.write(src.read())
+            else:
+                os.makedirs(d, exist_ok=True)
+                for subitem in os.listdir(s):
+                    sub_s = os.path.join(s, subitem)
+                    sub_d = os.path.join(d, subitem)
+                    with open(sub_s, 'rb') as src, open(sub_d, 'wb') as dst:
+                        dst.write(src.read())
+                        
         logger.info(f"Model deployed successfully to {prod_path}")
         return True
     except Exception as e:
@@ -421,15 +563,6 @@ train_task = PythonOperator(
     dag=dag,
 )
 
-# Register model using MLflow plugin operator
-register_model = MLflowModelOperator(
-    task_id='register_model',
-    mlflow_tracking_uri=MLFLOW_TRACKING_URI,
-    model_path="{{ ti.xcom_pull(task_ids='train_model') }}",
-    model_name=MODEL_NAME,
-    dag=dag
-)
-
 evaluate_task = PythonOperator(
     task_id='evaluate_model',
     python_callable=evaluate_model,
@@ -446,6 +579,15 @@ deploy_task = PythonOperator(
     task_id='deploy_model',
     python_callable=deploy_model,
     dag=dag,
+)
+
+# Register model using MLflow plugin operator
+register_model = MLflowModelOperator(
+    task_id='register_model',
+    mlflow_tracking_uri=MLFLOW_TRACKING_URI,
+    model_path="/tmp/model",  # Path to the MLflow model directory
+    model_name=MODEL_NAME,
+    dag=dag
 )
 
 # Set task dependencies
