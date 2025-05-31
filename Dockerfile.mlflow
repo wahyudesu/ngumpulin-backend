@@ -1,0 +1,46 @@
+FROM python:3.11.12-slim-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    netcat-traditional \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Copy package files
+COPY __init__.py ./
+COPY mlflow/pyproject.toml ./
+COPY mlflow/uv.lock ./
+
+# Install dependencies using uv sync
+RUN uv sync
+
+# Copy MLflow exporter
+COPY monitoring/prometheus/mlflow_exporter.py /app/mlflow_exporter.py
+
+# Create necessary directories
+RUN mkdir -p /mlflow
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV MLFLOW_TRACKING_URI=postgresql://mlflow:mlflow@postgres:5432/mlflow
+ENV MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow
+ENV MLFLOW_ARTIFACT_ROOT=/mlflow
+
+# Create entrypoint script
+COPY scripts/mlflow-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Expose ports
+EXPOSE 5000 8001
+
+# Use entrypoint script
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Run MLflow server
+CMD ["python", "-m", "mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "postgresql://mlflow:mlflow@postgres:5432/mlflow", "--default-artifact-root", "/mlflow"] 

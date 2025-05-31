@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mlflow-service"
+version = "0.1.0"
+description = "MLflow service for experiment tracking"
+dependencies = [
+    "mlflow>=2.8.0",
+    "psycopg2-binary>=2.9.9",
+    "sqlalchemy>=1.4.49,<2.0",
+    "python-dotenv>=1.0.0",
+    "prometheus-client>=0.19.0",
+]
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+[tool.hatch.build.targets.wheel]
+packages = ["mlflow"] 

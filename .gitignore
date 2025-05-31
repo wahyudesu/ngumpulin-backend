@@ -1,10 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+.venv39/
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
 .env
-__pycache__
-.ropeproject
 .venv
+.venv39
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# Logs
+*.log
+logs/
+airflow/logs/
+
+# Model files
+*.pkl
+*.h5
+*.model
+*.joblib
+
+# Database
+*.sqlite3
+*.db
+
+# Backup
+backup/
+scripts/backup/
+
+# Temporary files
+.DS_Store
+Thumbs.db
+
+.ropeproject
 .pytest_cache
 
 /notebook/gliner_Med
 
 mlflow.db
-mlruns/

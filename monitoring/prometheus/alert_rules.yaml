@@ -1,0 +1,115 @@
+groups:
+  - name: ML Pipeline Alerts
+    rules:
+      # Model Performance Alerts
+      - alert: ModelPerformanceDegradation
+        expr: ml_pipeline_silhouette_score < 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model performance degradation detected"
+          description: "Silhouette score has dropped below 0.5 for 5 minutes"
+
+      - alert: HighModelMemoryUsage
+        expr: ml_pipeline_memory_usage_bytes > 1e9  # 1GB
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage detected"
+          description: "Model memory usage has exceeded 1GB for 2 minutes"
+
+      - alert: HighCPUUsage
+        expr: ml_pipeline_cpu_usage_percent > 80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage has exceeded 80% for 2 minutes"
+
+      # Task Duration Alerts
+      - alert: LongTaskDuration
+        expr: rate(ml_pipeline_task_duration_seconds[5m]) > 300  # 5 minutes
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Long task duration detected"
+          description: "Task duration has exceeded 5 minutes for 5 minutes"
+
+      # Data Quality Alerts
+      - alert: HighDataDrift
+        expr: ml_pipeline_data_drift_score > 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High data drift detected"
+          description: "Data drift score has exceeded 0.3 for 10 minutes"
+
+      # Service Health Alerts
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service is down"
+          description: "Service has been down for more than 1 minute"
+
+      # Resource Exhaustion Alerts
+      - alert: MemoryExhaustion
+        expr: ml_pipeline_memory_usage_bytes > 2e9  # 2GB
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Memory exhaustion imminent"
+          description: "Memory usage has exceeded 2GB for 1 minute"
+
+      - alert: CPUExhaustion
+        expr: ml_pipeline_cpu_usage_percent > 90
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CPU exhaustion imminent"
+          description: "CPU usage has exceeded 90% for 1 minute"
+      
+      - alert: HighModelErrorRate
+        expr: rate(ml_pipeline_model_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High model error rate detected
+          description: Model error rate is above 10% for the last 5 minutes
+
+      - alert: PipelineTaskFailure
+        expr: ml_pipeline_task_failures_total > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Pipeline task failure detected
+          description: One or more pipeline tasks have failed
+
+      - alert: HighLatency
+        expr: ml_pipeline_request_duration_seconds > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High latency detected
+          description: Request duration is above 5 seconds
+
+      - alert: ModelPerformanceDegradation
+        expr: ml_pipeline_model_metrics_silhouette_score < 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Model performance degradation
+          description: Model silhouette score is below 0.5 for 15 minutes

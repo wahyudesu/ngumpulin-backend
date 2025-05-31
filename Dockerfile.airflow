@@ -1,0 +1,45 @@
+FROM python:3.11.12-slim-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    netcat-traditional \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Copy package files
+COPY __init__.py ./
+COPY airflow/pyproject.toml ./
+COPY airflow/uv.lock ./
+
+# Install dependencies using uv sync
+RUN uv sync
+
+# Create necessary directories
+RUN mkdir -p /opt/airflow/dags /opt/airflow/logs /opt/airflow/plugins
+
+# Set environment variables
+ENV PYTHONPATH=/opt/airflow/plugins
+ENV PYTHONUNBUFFERED=1
+ENV AIRFLOW_HOME=/opt/airflow
+ENV AIRFLOW__CORE__EXECUTOR=LocalExecutor
+ENV AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+ENV AIRFLOW__CORE__LOAD_EXAMPLES=False
+ENV GIT_PYTHON_REFRESH=quiet
+
+# Create entrypoint script
+COPY scripts/airflow-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Expose port
+EXPOSE 8080
+
+# Use entrypoint script
+ENTRYPOINT ["/entrypoint.sh"]
+
+CMD ["airflow", "webserver"]

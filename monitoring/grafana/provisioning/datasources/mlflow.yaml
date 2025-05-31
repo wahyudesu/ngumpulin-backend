@@ -1,0 +1,14 @@
+apiVersion: 1
+
+datasources:
+  - name: MLflow
+    type: prometheus
+    access: proxy
+    url: http://mlflow:8001
+    isDefault: false
+    editable: true
+    version: 1
+    jsonData:
+      timeInterval: "30s"
+      httpMethod: "GET"
+    secureJsonData: {} 
