@@ -392,8 +392,14 @@ def train_model(**context):
                 
             model.fit(X_weight)
             
-            # Save model using MLflow
+            # Clean up existing model directory before saving
             model_path = "/tmp/model"
+            if os.path.exists(model_path):
+                logger.info(f"Cleaning up existing model directory at {model_path}")
+                import shutil
+                shutil.rmtree(model_path)
+            
+            # Save model using MLflow
             os.makedirs(model_path, exist_ok=True)
             mlflow.sklearn.save_model(model, model_path)
             
@@ -401,7 +407,17 @@ def train_model(**context):
             mlflow.log_param("best_algorithm", best_algo)
             mlflow.log_metric("best_silhouette_score", float(results[best_algo]))
             
+            # Register model in MLflow Model Registry
+            model_details = mlflow.register_model(
+                model_uri=f"runs:/{mlflow.active_run().info.run_id}/model",
+                name=MODEL_NAME
+            )
+            
+            # Log model version
+            mlflow.log_param("model_version", model_details.version)
+            
             logger.info(f"Model training completed successfully. Best algorithm: {best_algo}")
+            logger.info(f"Model registered with version: {model_details.version}")
             return model_path
     except Exception as e:
         logger.error(f"Error in train_model: {str(e)}")
@@ -420,6 +436,12 @@ def evaluate_model(**context):
                 
             X_weight = pd.read_csv(weighted_path)
             
+            # --- Log training data size --- #
+            training_data_size = len(X_weight)
+            mlflow.log_metric("training_data_size", training_data_size)
+            logger.info(f"Logged training_data_size: {training_data_size}")
+            # --- End Log training data size --- #
+
             # Make predictions
             labels = model.predict(X_weight)
             
@@ -468,6 +490,17 @@ def monitor_model_performance(**context):
                 return True
                 
             latest_run = runs[0]
+            
+            # Check if required metrics exist in the latest run
+            required_metrics = ['silhouette_score', 'calinski_harabasz_score', 'davies_bouldin_score']
+            if not all(metric in latest_run.data.metrics for metric in required_metrics):
+                logger.warning("Latest run is missing required metrics. Skipping performance monitoring.")
+                mlflow.log_metric("monitoring_skipped", 1.0)
+                return True
+            
+            # Get training data size
+            training_data_size = latest_run.data.metrics.get('training_data_size', 0)
+            
             current_metrics = {
                 'silhouette': float(latest_run.data.metrics['silhouette_score']),
                 'calinski': float(latest_run.data.metrics['calinski_harabasz_score']),
@@ -478,28 +511,68 @@ def monitor_model_performance(**context):
             for metric, value in current_metrics.items():
                 mlflow.log_metric(f"current_{metric}", value)
             
-            # Only compare with previous run if it exists
+            # Calculate weighted score based on clustering metrics and data size
+            weights = {
+                'silhouette': 0.5,  # Higher weight for silhouette as it's most important for clustering
+                'calinski': 0.3,
+                'davies': 0.2
+            }
+            
+            # Calculate base score (higher is better for silhouette and calinski, lower is better for davies)
+            base_score = (
+                weights['silhouette'] * current_metrics['silhouette'] +
+                weights['calinski'] * current_metrics['calinski'] +
+                weights['davies'] * (1 - current_metrics['davies'])  # Invert davies score as lower is better
+            )
+            
+            # Calculate data size factor (normalize to 0-1 range)
+            # Assuming 1000 samples is a good baseline for clustering
+            data_size_factor = min(training_data_size / 1000, 1.0)
+            
+            # Calculate final weighted score
+            final_score = base_score * (0.7 + 0.3 * data_size_factor)
+            
+            # Log the weighted score and data size
+            mlflow.log_metric("weighted_score", final_score)
+            mlflow.log_metric("training_data_size", training_data_size)
+            mlflow.log_metric("data_size_factor", data_size_factor)
+            
+            # Only compare with previous run if it exists and has required metrics
             if len(runs) > 1:
-                previous_metrics = {
-                    'silhouette': float(runs[1].data.metrics['silhouette_score']),
-                    'calinski': float(runs[1].data.metrics['calinski_harabasz_score']),
-                    'davies': float(runs[1].data.metrics['davies_bouldin_score'])
-                }
-                
-                # Check for significant degradation
-                threshold = 0.1  # 10% degradation threshold
-                for metric in current_metrics:
-                    if current_metrics[metric] < previous_metrics[metric] * (1 - threshold):
-                        logger.warning(f"Significant degradation detected in {metric}")
-                        mlflow.log_metric(f"{metric}_degradation", 1.0)
-                    else:
-                        mlflow.log_metric(f"{metric}_degradation", 0.0)
+                previous_run = runs[1]
+                if all(metric in previous_run.data.metrics for metric in required_metrics):
+                    previous_metrics = {
+                        'silhouette': float(previous_run.data.metrics['silhouette_score']),
+                        'calinski': float(previous_run.data.metrics['calinski_harabasz_score']),
+                        'davies': float(previous_run.data.metrics['davies_bouldin_score'])
+                    }
+                    
+                    # Check for significant degradation
+                    threshold = 0.1  # 10% degradation threshold
+                    for metric in current_metrics:
+                        if metric == 'davies':  # For davies, higher is worse
+                            if current_metrics[metric] > previous_metrics[metric] * (1 + threshold):
+                                logger.warning(f"Significant degradation detected in {metric}")
+                                mlflow.log_metric(f"{metric}_degradation", 1.0)
+                            else:
+                                mlflow.log_metric(f"{metric}_degradation", 0.0)
+                        else:  # For silhouette and calinski, higher is better
+                            if current_metrics[metric] < previous_metrics[metric] * (1 - threshold):
+                                logger.warning(f"Significant degradation detected in {metric}")
+                                mlflow.log_metric(f"{metric}_degradation", 1.0)
+                            else:
+                                mlflow.log_metric(f"{metric}_degradation", 0.0)
+                else:
+                    logger.warning("Previous run is missing required metrics. Skipping degradation comparison.")
+                    mlflow.log_metric("previous_run_metrics_missing", 1.0)
             else:
                 logger.info("No previous run found for comparison. This is the first evaluation.")
                 mlflow.log_metric("first_evaluation", 1.0)
             
-            logger.info("Model performance monitoring completed")
+            logger.info(f"Model performance monitoring completed. Weighted score: {final_score:.4f}")
+            logger.info(f"Training data size: {training_data_size}")
             return True
+            
     except Exception as e:
         logger.error(f"Error in performance monitoring: {str(e)}")
         raise
@@ -514,6 +587,19 @@ def deploy_model(**context):
             
         # Copy model to production location
         prod_path = "/app/models"
+        
+        # Clean up existing model files if they exist
+        if os.path.exists(prod_path):
+            logger.info(f"Cleaning up existing model files in {prod_path}")
+            for item in os.listdir(prod_path):
+                item_path = os.path.join(prod_path, item)
+                if os.path.isfile(item_path):
+                    os.remove(item_path)
+                elif os.path.isdir(item_path):
+                    import shutil
+                    shutil.rmtree(item_path)
+        
+        # Create fresh directory
         os.makedirs(prod_path, exist_ok=True)
         
         # Copy the entire model directory
@@ -562,19 +648,19 @@ train_task = PythonOperator(
     dag=dag,
 )
 
-# Register model using MLflow plugin operator
-register_model = MLflowModelOperator(
-    task_id='register_model',
-    mlflow_tracking_uri=MLFLOW_TRACKING_URI,
-    model_path="/tmp/model",  # Path to the MLflow model directory
-    model_name=MODEL_NAME,
-    dag=dag
-)
-
 evaluate_task = PythonOperator(
     task_id='evaluate_model',
     python_callable=evaluate_model,
     dag=dag,
+)
+
+# Register model using MLflow plugin operator
+register_model = MLflowModelOperator(
+    task_id='register_model',
+    mlflow_tracking_uri=MLFLOW_TRACKING_URI,
+    model_name=MODEL_NAME,
+    experiment_name=EXPERIMENT_NAME,
+    dag=dag
 )
 
 monitor_task = PythonOperator(
@@ -590,4 +676,4 @@ deploy_task = PythonOperator(
 )
 
 # Set task dependencies
-create_experiment >> extract_task >> validate_task >> preprocess_task >> train_task >> register_model >> evaluate_task >> monitor_task >> deploy_task
+create_experiment >> extract_task >> validate_task >> preprocess_task >> train_task >> evaluate_task >> register_model >> monitor_task >> deploy_task

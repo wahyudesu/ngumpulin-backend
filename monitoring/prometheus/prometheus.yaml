@@ -12,24 +12,23 @@ rule_files:
   - "alert_rules.yaml"
 
 scrape_configs:
-  - job_name: 'prometheus'
-    static_configs:
-      - targets: ['localhost:9090']
-
   - job_name: 'fastapi'
     static_configs:
       - targets: ['fastapi-app:8000']
     metrics_path: '/metrics'
+    scheme: 'http'
+    scrape_interval: 5s
+    scrape_timeout: 5s
 
-  - job_name: 'mlflow'
+  - job_name: 'prometheus'
     static_configs:
-      - targets: ['mlflow:5000']
-    metrics_path: '/metrics'
+      - targets: ['localhost:9090']
 
   - job_name: 'airflow'
     static_configs:
       - targets: ['airflow-webserver:8080']
     metrics_path: '/metrics'
+    scheme: 'http'
 
   - job_name: 'grafana'
     static_configs:

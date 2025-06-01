@@ -15,11 +15,15 @@ services:
     dns:
       - 8.8.8.8
       - 8.8.4.4
+      - 1.1.1.1
     depends_on:
-      - postgres
-      - mlflow
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
     volumes:
       - ./app:/app/app
+      - ./app/models:/app/models
     labels:
       - "prometheus.scrape=true"
       - "prometheus.port=8000"
@@ -30,6 +34,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
   adminer:
     image: adminer
@@ -69,6 +74,10 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_UNIFIED_ALERTING_ENABLED=true
       - GF_INSTALL_PLUGINS=grafana-lokiexplore-app
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=grafana-lokiexplore-app
+      - GF_PLUGIN_UPDATE_CHECK_ENABLED=false
+      - GF_PLUGIN_UPDATE_CHECK_INTERVAL=0
+      - GF_PLUGIN_UPDATE_CHECK_TIMEOUT=0
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -79,24 +88,29 @@ services:
       - prometheus
     networks:
       - backend-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   mlflow:
     build:
       context: .
       dockerfile: Dockerfile.mlflow
-    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://postgres:postgres@postgres:5432/mlflow
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://postgres:postgres@postgres:5432/mlflow --default-artifact-root file:/mlflow/artifacts
     ports:
       - "5000:5000"
-      - "8001:8001"
     environment:
-      - MLFLOW_TRACKING_URI=postgresql://postgres:postgres@postgres:5432/mlflow
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=file:/mlflow/artifacts
       - PYTHONPATH=/app
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
+      - ./mlflow/artifacts:/mlflow/artifacts
       - mlflow-data:/mlflow
-      - ./monitoring/prometheus:/app/monitoring/prometheus
     networks:
       - backend-network
     healthcheck:
@@ -107,6 +121,7 @@ services:
     dns:
       - 8.8.8.8
       - 8.8.4.4
+    user: "${UID:-1000}:${GID:-1000}"
 
   airflow-webserver:
     build:

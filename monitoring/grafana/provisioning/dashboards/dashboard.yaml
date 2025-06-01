@@ -1,9 +1,9 @@
 apiVersion: 1
 
 providers:
-  - name: 'ML Pipeline'
+  - name: 'FastAPI Dashboard'
     orgId: 1
-    folder: 'ML Pipeline'
+    folder: 'FastAPI Dashboard'
     type: file
     disableDeletion: false
     editable: true

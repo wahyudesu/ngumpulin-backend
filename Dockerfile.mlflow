@@ -19,9 +19,6 @@ COPY mlflow/uv.lock ./
 # Install dependencies using uv sync
 RUN uv sync
 
-# Copy MLflow exporter
-COPY monitoring/prometheus/mlflow_exporter.py /app/mlflow_exporter.py
-
 # Create necessary directories
 RUN mkdir -p /mlflow
 
@@ -37,7 +34,7 @@ COPY scripts/mlflow-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Expose ports
-EXPOSE 5000 8001
+EXPOSE 5000
 
 # Use entrypoint script
 ENTRYPOINT ["/entrypoint.sh"]
