@@ -2,6 +2,8 @@ import os
 import re
 import json
 import numpy as np
+import tempfile
+import shutil
 from fastapi import FastAPI, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
@@ -12,7 +14,6 @@ from gliner import GLiNER
 from dotenv import load_dotenv
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
-# from routers.agent import generate_feedback, AssignmentRequest
 from prometheus_fastapi_instrumentator import Instrumentator
 import pickle
 from sklearn.preprocessing import StandardScaler
@@ -21,9 +22,15 @@ import warnings
 import logging
 import mlflow
 import mlflow.sklearn
+from app.routers.agent import generate_feedback, AssignmentRequest
 from app.utils.metrics import setup_metrics
+from app.core.exceptions import ModelLoadError
 from contextlib import asynccontextmanager
-warnings.filterwarnings("ignore", category=UserWarning)
+from pydantic import BaseModel
+from typing import List, Dict, Any
+from mlflow.tracking import MlflowClient
+
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -32,54 +39,165 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# Constants
+MODEL_NAME = "document-clustering"
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+
 # Initialize MLflow
-mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000"))
+mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 mlflow.set_experiment("document-processing")
 
-# Load the best model from MLflow
 def load_best_model():
+    """Load the best model based on weighted score considering clustering metrics and training data size."""
+    temp_dir = None # Initialize temp_dir
     try:
-        # Get the best run based on metrics
-        runs = mlflow.search_runs(
-            experiment_ids=[mlflow.get_experiment_by_name("document-processing").experiment_id],
-            filter_string="metrics.silhouette_score > 0",
-            order_by=["metrics.silhouette_score DESC"]
+        client = mlflow.tracking.MlflowClient()
+        experiment = client.get_experiment_by_name("document-processing")
+        
+        if experiment is None:
+            logger.warning("Experiment 'document-processing' not found, trying to load local model")
+            # Instead of returning local model directly here, raise an error to trigger fallback in lifespan
+            raise ModelLoadError("MLflow experiment not found")
+            
+        # Get all runs and calculate weighted scores
+        runs = client.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            filter_string="tags.mlflow.runName = 'model_evaluation'"
         )
         
-        if runs.empty:
-            logger.warning("No model found in MLflow, loading from local file")
-            model_path = os.path.join(os.path.dirname(__file__), 'best_model.pkl')
-            with open(model_path, 'rb') as file:
-                return pickle.load(file)
+        if not runs:
+            logger.warning("No model runs found, trying to load local model")
+            # Instead of returning local model directly here, raise an error to trigger fallback in lifespan
+            raise ModelLoadError("No valid model runs found in MLflow")
+            
+        # Calculate weighted scores for each run
+        best_score = -float('inf')
+        best_run = None
         
-        # Get the latest production model from MLflow Model Registry
-        client = mlflow.tracking.MlflowClient()
-        try:
-            # Try to get the latest production model
-            model_uri = f"models:/document-clustering/Production"
-            logger.info(f"Loading production model from MLflow: {model_uri}")
-            return mlflow.sklearn.load_model(model_uri)
-        except Exception as e:
-            logger.warning(f"Could not load production model: {str(e)}")
-            # Fallback to best run
-            best_run = runs.iloc[0]
-            model_uri = f"runs:/{best_run.run_id}/model"
-            logger.info(f"Loading best run model from MLflow: {model_uri}")
-            return mlflow.sklearn.load_model(model_uri)
+        for run in runs:
+            metrics = run.data.metrics
+            
+            # Check if all required metrics exist
+            required_metrics = ['silhouette_score', 'calinski_harabasz_score', 'davies_bouldin_score', 'training_data_size']
+            if not all(metric in metrics for metric in required_metrics):
+                continue
+                
+            # Get training data size
+            training_data_size = float(metrics.get('training_data_size', 0))
+            
+            # Calculate clustering metrics score
+            weights = {
+                'silhouette': 0.5,  # Higher weight for silhouette as it's most important for clustering
+                'calinski': 0.3,
+                'davies': 0.2
+            }
+            
+            # Calculate base score (higher is better for silhouette and calinski, lower is better for davies)
+            # Ensure metrics are floats
+            try:
+                base_score = (
+                    weights['silhouette'] * float(metrics['silhouette_score']) +
+                    weights['calinski'] * float(metrics['calinski_harabasz_score']) +
+                    weights['davies'] * (1 - float(metrics['davies_bouldin_score']))  # Invert davies score
+                )
+            except ValueError:
+                logger.warning(f"Skipping run {run.info.run_id} due to non-numeric metrics.")
+                continue
+            
+            # Calculate data size factor (normalize to 0-1 range)
+            # Assuming 1000 is the baseline
+            data_size_factor = min(training_data_size / 1000.0, 1.0)
+            
+            # Calculate final weighted score
+            final_score = base_score * (0.7 + 0.3 * data_size_factor)
+            
+            if final_score > best_score:
+                best_score = final_score
+                best_run = run
+        
+        if best_run is None:
+            logger.warning("No valid model runs found with required metrics, trying to load local model")
+            # Instead of returning local model directly here, raise an error to trigger fallback in lifespan
+            raise ModelLoadError("No valid model runs found with required metrics in MLflow")
+            
+        # --- Download the model artifact ---  
+        temp_dir = tempfile.mkdtemp() # Create a temporary directory
+        artifact_path = "model" # The artifact path logged in train_model
+        local_path = client.download_artifacts(best_run.info.run_id, artifact_path, dst_path=temp_dir)
+        
+        # Load the model from the downloaded path
+        model = mlflow.sklearn.load_model(local_path)
+        
+        # Log model details
+        logger.info(f"Downloaded and loaded model from run {best_run.info.run_id} to {local_path}")
+        logger.info(f"Training data size: {best_run.data.metrics.get('training_data_size', 0)}")
+        
+        return model
+        
     except Exception as e:
-        logger.error(f"Error loading model from MLflow: {str(e)}")
-        logger.info("Falling back to local model")
-        model_path = os.path.join(os.path.dirname(__file__), 'best_model.pkl')
-        with open(model_path, 'rb') as file:
-            return pickle.load(file)
+        logger.warning(f"Error loading model from MLflow: {str(e)}") # Keep warning, but re-raise to trigger fallback
+        raise ModelLoadError(f"Failed to load model from MLflow: {str(e)}") # Re-raise the exception
+        
+    finally:
+        # Clean up the temporary directory
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+                logger.info(f"Cleaned up temporary directory {temp_dir}")
+            except Exception as cleanup_e:
+                logger.warning(f"Error cleaning up temporary directory {temp_dir}: {str(cleanup_e)}")
 
-# Load the model
-loaded_model = load_best_model()
+def load_local_model():
+    """Load model from local directory if MLflow is not available."""
+    try:
+        local_model_path = "/app/models/local_model.pkl" # Assuming the model is saved as local_model.pkl by Airflow
+        # Check if the model directory exists and contains a file, or if the pkl file exists
+        if os.path.exists(local_model_path) and os.path.isfile(local_model_path):
+            logger.info(f"Loading model from local file {local_model_path}")
+            with open(local_model_path, 'rb') as f:
+                model = pickle.load(f)
+            return model
+        elif os.path.exists("/app/models") and os.path.isdir("/app/models") and any(os.path.isfile(os.path.join("/app/models", f)) for f in os.listdir("/app/models")):
+            # If /app/models exists and contains files, it might be the MLflow saved model structure
+            mlflow_local_path = "/app/models" # Assuming the entire MLflow model structure is copied here
+            logger.info(f"Loading model from local MLflow structure at {mlflow_local_path}")
+            model = mlflow.sklearn.load_model(mlflow_local_path)
+            return model
+        else:
+            logger.warning("No local model found at expected locations (/app/models/local_model.pkl or /app/models)")
+            raise ModelLoadError("No model available locally")
+    except Exception as e:
+        logger.error(f"Error loading local model: {str(e)}")
+        raise ModelLoadError(f"Failed to load local model: {str(e)}")
+
+class PredictionInput(BaseModel):
+    sentences: int
+    page: int
+    timing: int
+    plagiarism: float
+
+class PredictionOutput(BaseModel):
+    cluster: int
+    confidence: float
+    metadata: Dict[str, Any]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up the application...")
+    try:
+        # First, try loading the local model
+        model = load_local_model()
+        logger.info("Local model loaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to load local model: {str(e)}")
+        # If local model fails, try loading from MLflow as a fallback
+        try:
+            model = load_best_model()
+            logger.info("MLflow model loaded successfully")
+        except Exception as mlflow_e:
+            logger.error(f"Failed to load model from MLflow: {str(mlflow_e)}")
+            model = None # Ensure model is None if both fail
     yield
     # Shutdown
     logger.info("Shutting down the application...")
@@ -120,7 +238,53 @@ def read_root():
 # Health check endpoint
 @app.get("/health")
 def health_check():
-    return {"status": "healthy"}
+    try:
+        # Check MLflow connection
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        client = mlflow.tracking.MlflowClient()
+        try:
+            # Try to get experiment instead of list_experiments
+            experiment = client.get_experiment_by_name("document-processing")
+            mlflow_status = "connected" if experiment is not None else "connecting"
+        except Exception as mlflow_error:
+            logger.warning(f"MLflow connection issue: {str(mlflow_error)}")
+            mlflow_status = "connecting"
+        
+        # Try to load model, but don't fail if not available yet
+        try:
+            model = load_best_model()
+            model_status = "loaded"
+        except Exception as model_error:
+            logger.warning(f"Model not loaded yet: {str(model_error)}")
+            model_status = "loading"
+        
+        # Check Supabase connection
+        try:
+            supabase.table("documents").select("count").limit(1).execute()
+            supabase_status = "connected"
+        except Exception as supabase_error:
+            logger.warning(f"Supabase connection issue: {str(supabase_error)}")
+            supabase_status = "connecting"
+        
+        return {
+            "status": "healthy",
+            "components": {
+                "mlflow": mlflow_status,
+                "model": model_status,
+                "supabase": supabase_status
+            }
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "components": {
+                "mlflow": "error" if "mlflow" in str(e).lower() else "unknown",
+                "model": "error" if "model" in str(e).lower() else "unknown",
+                "supabase": "error" if "supabase" in str(e).lower() else "unknown"
+            }
+        }, 503
 
 # Upload route
 @app.post("/upload")
@@ -205,7 +369,7 @@ async def upload_file(uuid: str = Form(...), file_url: str = Form(...)):
                 'plagiarism': [plagiarism_score]
             })
             scaled_data = StandardScaler().fit_transform(df)
-            cluster = loaded_model.fit_predict(scaled_data)[0]
+            cluster = model.fit_predict(scaled_data)[0]
 
             # Update DB
             response = supabase.table("documents").update({
@@ -235,17 +399,7 @@ async def upload_file(uuid: str = Form(...), file_url: str = Form(...)):
             mlflow.log_param("error", str(e))
             raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# # Model request untuk agent feedback
-# class AssignmentMetaModel(BaseModel):
-#     title: str
-#     description: str
-
-# class AssignmentRequest(BaseModel):
-#     assignment_meta: AssignmentMetaModel
-#     assignment_content: str
-
 # Route baru untuk memproses feedback assignment
-
 @app.post("/agent-feedback")
 async def agent_feedback_endpoint(uuid: str = Form(...)):
     with mlflow.start_run(run_name=f"agent_feedback_{uuid}"):
@@ -262,7 +416,7 @@ async def agent_feedback_endpoint(uuid: str = Form(...)):
 
             # Get folder information
             folder_record = supabase.table("folders").select("nameAssignment", "description").eq("nameAssignment", folder).execute()
-            if not folder_record:
+            if not folder_record.data:
                 raise HTTPException(status_code=404, detail=f"No folder found with nameAssignment: {folder}")
 
             title = folder_record.data[0]["nameAssignment"]
@@ -275,10 +429,11 @@ async def agent_feedback_endpoint(uuid: str = Form(...)):
             # Generate feedback
             persona = "Provide feedback in a formal and constructive tone suitable for academic purposes."
             payload = AssignmentRequest(
-                title=title,
-                description=description,
-                content=assignment_content,
-                persona=persona
+                assignment_meta={
+                    "title": title,
+                    "description": description
+                },
+                assignment_content=assignment_content
             )
 
             feedback_result = generate_feedback(payload)
@@ -292,28 +447,71 @@ async def agent_feedback_endpoint(uuid: str = Form(...)):
             mlflow.log_param("error", str(e))
             raise HTTPException(status_code=500, detail=str(e))
 
-# @app.post("/agent-feedback")
-# async def agent_feedback_endpoint(uuid: str = Form(...)):
-#     try:
-#         # Get document data by UUID
-#         current_record = supabase.table("documents").select("*").eq("id", uuid).execute()
-#         if not current_record.data:
-#             raise HTTPException(status_code=404, detail=f"No record found with uuid: {uuid}")
+@app.post("/predict", response_model=PredictionOutput)
+def predict(input_data: PredictionInput):
+    try:
+        model = load_best_model()
         
-#         # Extract assignment content from the current record
-#         assignment_content = current_record.data[0]["isiTugas"]
-#         folder = current_record.data[0]["folder"]
-
-#         # Get previous records in the same folder
-#         tugas = supabase.table("documents").select("folder").eq("folder", folder).execute().data
-
-#         deadline = tugas.data["deadline"]
+        # Create input array
+        X = np.array([[input_data.sentences, input_data.page, input_data.timing, input_data.plagiarism]])
         
-#         # Process feedback
-#         feedback_result = generate_feedback(
-#             assignment_meta={"title": "Assignment", "description": "Student Submission"},
-#             assignment_content=assignment_content
-#         )
-#         return feedback_result
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
+        # Manual min-max scaling
+        # Assuming these are the min and max values from your training data
+        min_values = np.array([0, 0, 0, 0])  # Minimum values for each feature
+        max_values = np.array([100, 100, 100, 100])  # Maximum values for each feature
+        
+        # Apply min-max scaling
+        X_scaled = (X - min_values) / (max_values - min_values)
+        
+        # Apply feature weights (same as in DAG)
+        weights = np.array([0.5, 0.5, 1.5, 4.5])
+        X_weighted = X_scaled * weights
+        
+        # Make prediction
+        cluster = int(model.predict(X_weighted)[0])
+        
+        # Calculate confidence (distance to cluster center)
+        if hasattr(model, 'cluster_centers_'):
+            centers = model.cluster_centers_
+            distances = np.linalg.norm(X_weighted - centers[cluster])
+            confidence = float(1 / (1 + distances))  # Convert distance to confidence score
+        else:
+            confidence = 1.0
+            
+        # Get model metadata
+        metadata = {
+            "model_type": type(model).__name__,
+            "n_clusters": getattr(model, 'n_clusters_', getattr(model, 'n_components_', None)),
+            "feature_weights": weights.tolist(),
+            "scaling": {
+                "type": "min-max",
+                "min_values": min_values.tolist(),
+                "max_values": max_values.tolist()
+            }
+        }
+        
+        return PredictionOutput(
+            cluster=cluster,
+            confidence=confidence,
+            metadata=metadata
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
+@app.get("/model-info")
+def get_model_info():
+    try:
+        model = load_best_model()
+        metadata = {
+            "model_type": type(model).__name__,
+            "n_clusters": getattr(model, 'n_clusters_', getattr(model, 'n_components_', None)),
+            "feature_weights": [0.5, 0.5, 1.5, 4.5],
+            "scaling": {
+                "type": "min-max",
+                "min_values": [0, 0, 0, 0],
+                "max_values": [100, 100, 100, 100]
+            }
+        }
+        return metadata
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting model info: {str(e)}")
