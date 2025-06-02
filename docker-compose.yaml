@@ -12,6 +12,9 @@ services:
       - SUPABASE_KEY=${SUPABASE_KEY}
       - PINECONE_API_KEY=${PINECONE_API_KEY}
       - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=file:///mlflow/artifacts
+      - MLFLOW_ARTIFACT_ROOT=file:///mlflow/artifacts
+      - MLFLOW_SERVE_ARTIFACTS=true
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -23,7 +26,8 @@ services:
         condition: service_healthy
     volumes:
       - ./app:/app/app
-      - ./app/models:/app/models
+      - app-models:/app/models
+      - mlflow-data:/mlflow
     labels:
       - "prometheus.scrape=true"
       - "prometheus.port=8000"
@@ -98,18 +102,25 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mlflow
-    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://postgres:postgres@postgres:5432/mlflow --default-artifact-root file:/mlflow/artifacts
+      args:
+        - USER_ID=${UID:-1000}
+        - GROUP_ID=${GID:-1000}
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://postgres:postgres@postgres:5432/mlflow --default-artifact-root file:///mlflow/artifacts --serve-artifacts
     ports:
       - "5000:5000"
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT=file:/mlflow/artifacts
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=file:///mlflow/artifacts
+      - MLFLOW_ARTIFACT_ROOT=file:///mlflow/artifacts
+      - MLFLOW_SERVE_ARTIFACTS=true
       - PYTHONPATH=/app
+      - UID=${UID:-1000}
+      - GID=${GID:-1000}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - ./mlflow/artifacts:/mlflow/artifacts
+      - app-models:/app/models
       - mlflow-data:/mlflow
     networks:
       - backend-network
@@ -121,7 +132,6 @@ services:
     dns:
       - 8.8.8.8
       - 8.8.4.4
-    user: "${UID:-1000}:${GID:-1000}"
 
   airflow-webserver:
     build:
@@ -136,6 +146,9 @@ services:
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
       - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
       - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=file:///mlflow/artifacts
+      - MLFLOW_ARTIFACT_ROOT=file:///mlflow/artifacts
+      - MLFLOW_SERVE_ARTIFACTS=true
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_KEY=${SUPABASE_KEY}
     depends_on:
@@ -147,6 +160,8 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - app-models:/app/models
+      - mlflow-data:/mlflow
     networks:
       - backend-network
     dns:
@@ -164,6 +179,9 @@ services:
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
       - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
       - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=file:///mlflow/artifacts
+      - MLFLOW_ARTIFACT_ROOT=file:///mlflow/artifacts
+      - MLFLOW_SERVE_ARTIFACTS=true
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_KEY=${SUPABASE_KEY}
     depends_on:
@@ -175,6 +193,8 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - app-models:/app/models
+      - mlflow-data:/mlflow
     networks:
       - backend-network
     dns:
@@ -209,3 +229,4 @@ volumes:
   prometheus-data:
   grafana-data:
   mlflow-data:
+  app-models:

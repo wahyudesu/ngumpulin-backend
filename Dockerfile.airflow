@@ -21,7 +21,9 @@ COPY airflow/uv.lock ./
 RUN uv sync
 
 # Create necessary directories
-RUN mkdir -p /opt/airflow/dags /opt/airflow/logs /opt/airflow/plugins
+RUN mkdir -p /opt/airflow/dags /opt/airflow/logs /opt/airflow/plugins /mlflow/artifacts && \
+    chown -R 1000:1000 /mlflow && \
+    chmod -R 755 /mlflow
 
 # Set environment variables
 ENV PYTHONPATH=/opt/airflow/plugins

@@ -1,7 +1,7 @@
 FROM python:3.11.12-slim-bookworm
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     netcat-traditional \
     && rm -rf /var/lib/apt/lists/*
@@ -9,6 +9,13 @@ RUN apt-get update && apt-get install -y \
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# Create non-root user
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+RUN groupadd -g ${GROUP_ID} mlflow && \
+    useradd -u ${USER_ID} -g mlflow -m -s /bin/bash mlflow
+
+# Set working directory
 WORKDIR /app
 
 # Copy package files
@@ -19,25 +26,34 @@ COPY mlflow/uv.lock ./
 # Install dependencies using uv sync
 RUN uv sync
 
-# Create necessary directories
-RUN mkdir -p /mlflow
+# Copy entrypoint script
+COPY scripts/mlflow-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/mlflow-entrypoint.sh
+
+# Create necessary directories and set permissions BEFORE switching user
+RUN mkdir -p /mlflow/artifacts && \
+    chown -R ${USER_ID}:${GROUP_ID} /mlflow && \
+    chmod -R 755 /mlflow
 
 # Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-ENV MLFLOW_TRACKING_URI=postgresql://mlflow:mlflow@postgres:5432/mlflow
-ENV MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow
-ENV MLFLOW_ARTIFACT_ROOT=/mlflow
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app \
+    MLFLOW_TRACKING_URI=http://mlflow:5000 \
+    MLFLOW_DEFAULT_ARTIFACT_ROOT=file:///mlflow/artifacts \
+    MLFLOW_ARTIFACT_ROOT=file:///mlflow/artifacts \
+    MLFLOW_SERVE_ARTIFACTS=true
 
-# Create entrypoint script
-COPY scripts/mlflow-entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Switch to non-root user AFTER setting permissions
+USER mlflow
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/mlflow-entrypoint.sh"]
 
 # Expose ports
 EXPOSE 5000
 
-# Use entrypoint script
-ENTRYPOINT ["/entrypoint.sh"]
-
 # Run MLflow server
-CMD ["python", "-m", "mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "postgresql://mlflow:mlflow@postgres:5432/mlflow", "--default-artifact-root", "/mlflow"] 
+CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "postgresql://postgres:postgres@postgres:5432/mlflow", "--default-artifact-root", "file:///mlflow/artifacts", "--serve-artifacts"] 

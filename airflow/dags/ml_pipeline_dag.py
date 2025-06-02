@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import mlflow
 import mlflow.sklearn
+from mlflow.tracking import MlflowClient
 import pickle
 import json
 import os
@@ -39,6 +40,14 @@ else:
     experiment_id = experiment.experiment_id
 mlflow.set_experiment(experiment_id=experiment_id)
 
+# Ensure artifact directory exists
+artifact_root = "/mlflow/artifacts"
+if not os.path.exists(artifact_root):
+    os.makedirs(artifact_root, exist_ok=True)
+    logger.info(f"✓ Created artifact directory: {artifact_root}")
+else:
+    logger.info(f"✓ Artifact directory exists: {artifact_root}")
+
 default_args = {
     'owner': 'ngumpulin',
     'depends_on_past': False,
@@ -50,7 +59,7 @@ default_args = {
     'params': {
         'n_trials': Variable.get('n_trials', 20),
         'silhouette_threshold': Variable.get('silhouette_threshold', 0.5),
-        'model_dir': Variable.get('model_dir', '/tmp/models'),
+        'model_dir': Variable.get('model_dir', '/mlflow/artifacts/models'),
     }
 }
 
@@ -96,7 +105,8 @@ def extract_data(**context):
             mlflow.log_metric("avg_sentences", avg_sentences)
             mlflow.log_metric("avg_pages", avg_pages)
             
-            out_path = "/tmp/extracted_data.csv"
+            out_path = "/mlflow/artifacts/extracted_data.csv"
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
             df.to_csv(out_path, index=False)
             mlflow.log_artifact(out_path, "raw_data")
             
@@ -248,9 +258,11 @@ def preprocess_data(**context):
             X_weight = X_scaled * weights
             X_weight = pd.DataFrame(X_weight, columns=data.columns)
             
-            # Save scaler and weighted data
-            scaler_path = "/tmp/scaler.pkl"
-            weighted_path = "/tmp/preprocessed_data.csv"
+            # Save scaler and weighted data to shared volume
+            scaler_path = "/mlflow/artifacts/scaler.pkl"
+            weighted_path = "/mlflow/artifacts/preprocessed_data.csv"
+            os.makedirs(os.path.dirname(scaler_path), exist_ok=True)
+            
             with open(scaler_path, 'wb') as f:
                 pickle.dump(scaler, f)
             X_weight.to_csv(weighted_path, index=False)
@@ -282,6 +294,57 @@ def train_model(**context):
         with mlflow.start_run(run_name="model_training", experiment_id=experiment_id, nested=True):
             weighted_path = context['ti'].xcom_pull(task_ids='preprocess_data')
             X_weight = pd.read_csv(weighted_path)
+            
+            # Get all previous model runs
+            client = MlflowClient()
+            runs = client.search_runs(
+                experiment_ids=[experiment_id],
+                filter_string="tags.mlflow.runName = 'model_evaluation'",
+                max_results=10  # Get last 10 runs
+            )
+            
+            # Calculate weighted scores for each run
+            best_score = -float('inf')
+            best_run = None
+            
+            for run in runs:
+                metrics = run.data.metrics
+                
+                # Check if all required metrics exist
+                required_metrics = ['silhouette_score', 'calinski_harabasz_score', 'davies_bouldin_score', 'training_data_size']
+                if not all(metric in metrics for metric in required_metrics):
+                    continue
+                    
+                # Get training data size
+                training_data_size = float(metrics.get('training_data_size', 0))
+                
+                # Calculate clustering metrics score
+                weights = {
+                    'silhouette': 0.5,  # Higher weight for silhouette as it's most important for clustering
+                    'calinski': 0.3,
+                    'davies': 0.2
+                }
+                
+                # Calculate base score (higher is better for silhouette and calinski, lower is better for davies)
+                try:
+                    base_score = (
+                        weights['silhouette'] * float(metrics['silhouette_score']) +
+                        weights['calinski'] * float(metrics['calinski_harabasz_score']) +
+                        weights['davies'] * (1 - float(metrics['davies_bouldin_score']))  # Invert davies score
+                    )
+                except ValueError:
+                    logger.warning(f"Skipping run {run.info.run_id} due to non-numeric metrics.")
+                    continue
+                
+                # Calculate data size factor (normalize to 0-1 range)
+                data_size_factor = min(training_data_size / 1000.0, 1.0)
+                
+                # Calculate final weighted score
+                final_score = base_score * (0.7 + 0.3 * data_size_factor)
+                
+                if final_score > best_score:
+                    best_score = final_score
+                    best_run = run
             
             # Define Optuna objectives
             def objective_kmeans(trial):
@@ -392,20 +455,51 @@ def train_model(**context):
                 
             model.fit(X_weight)
             
-            # Clean up existing model directory before saving
-            model_path = "/tmp/model"
-            if os.path.exists(model_path):
-                logger.info(f"Cleaning up existing model directory at {model_path}")
-                import shutil
-                shutil.rmtree(model_path)
+            # Calculate metrics for current model
+            labels = model.predict(X_weight)
+            current_metrics = {
+                'silhouette_score': float(silhouette_score(X_weight, labels)),
+                'calinski_harabasz_score': float(calinski_harabasz_score(X_weight, labels)),
+                'davies_bouldin_score': float(davies_bouldin_score(X_weight, labels)),
+                'training_data_size': float(len(X_weight))
+            }
             
-            # Save model using MLflow
-            os.makedirs(model_path, exist_ok=True)
-            mlflow.sklearn.save_model(model, model_path)
+            # Calculate current model's score
+            current_base_score = (
+                weights['silhouette'] * current_metrics['silhouette_score'] +
+                weights['calinski'] * current_metrics['calinski_harabasz_score'] +
+                weights['davies'] * (1 - current_metrics['davies_bouldin_score'])
+            )
+            
+            current_data_size_factor = min(current_metrics['training_data_size'] / 1000.0, 1.0)
+            current_final_score = current_base_score * (0.7 + 0.3 * current_data_size_factor)
+            
+            # Compare with best previous model
+            if best_run is not None and best_score > current_final_score:
+                logger.info(f"Previous model {best_run.info.run_id} is better than current model")
+                # Load and use the previous model
+                model = mlflow.sklearn.load_model(f"runs:/{best_run.info.run_id}/model")
+                mlflow.log_param("using_previous_model", True)
+                mlflow.log_param("previous_model_run_id", best_run.info.run_id)
+                mlflow.log_metric("previous_model_score", best_score)
+            else:
+                logger.info("Current model is better than all previous models")
+                mlflow.log_param("using_previous_model", False)
+                mlflow.log_metric("current_model_score", current_final_score)
+            
+            # Log model parameters
+            mlflow.log_params(params)
+            
+            # Log the model as an artifact
+            mlflow.sklearn.log_model(model, "model")
             
             # Log training metrics
             mlflow.log_param("best_algorithm", best_algo)
             mlflow.log_metric("best_silhouette_score", float(results[best_algo]))
+            
+            # Log all metrics
+            for metric_name, value in current_metrics.items():
+                mlflow.log_metric(metric_name, value)
             
             # Register model in MLflow Model Registry
             model_details = mlflow.register_model(
@@ -418,7 +512,9 @@ def train_model(**context):
             
             logger.info(f"Model training completed successfully. Best algorithm: {best_algo}")
             logger.info(f"Model registered with version: {model_details.version}")
-            return model_path
+            
+            # Return the model URI for downstream tasks
+            return f"runs:/{mlflow.active_run().info.run_id}/model"
     except Exception as e:
         logger.error(f"Error in train_model: {str(e)}")
         raise
@@ -427,8 +523,13 @@ def evaluate_model(**context):
     """Evaluate model performance and log metrics to MLflow."""
     try:
         with mlflow.start_run(run_name="model_evaluation", experiment_id=experiment_id, nested=True):
+            # Get model URI from previous task
+            model_uri = context['ti'].xcom_pull(task_ids='train_model')
+            if not model_uri:
+                raise ValueError("No model URI found from train_model task")
+                
             # Load model from MLflow
-            model = mlflow.sklearn.load_model("/tmp/model")
+            model = mlflow.sklearn.load_model(model_uri)
             
             weighted_path = context['ti'].xcom_pull(task_ids='preprocess_data')
             if not os.path.exists(weighted_path):
@@ -477,7 +578,7 @@ def monitor_model_performance(**context):
     try:
         with mlflow.start_run(run_name="performance_monitoring", experiment_id=experiment_id, nested=True):
             # Get the latest model metrics
-            client = mlflow.tracking.MlflowClient()
+            client = MlflowClient()
             runs = client.search_runs(
                 experiment_ids=[experiment_id],
                 filter_string="tags.mlflow.runName = 'model_evaluation'",
@@ -580,12 +681,15 @@ def monitor_model_performance(**context):
 def deploy_model(**context):
     """Deploy the best model."""
     try:
-        # Use the MLflow model directory
-        model_path = "/tmp/model"
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model directory not found at {model_path}")
+        # Get model URI from train_model task
+        model_uri = context['ti'].xcom_pull(task_ids='train_model')
+        if not model_uri:
+            raise ValueError("No model URI found from train_model task")
             
-        # Copy model to production location
+        # Load model from MLflow
+        model = mlflow.sklearn.load_model(model_uri)
+        
+        # Save model to production location
         prod_path = "/app/models"
         
         # Clean up existing model files if they exist
@@ -602,20 +706,8 @@ def deploy_model(**context):
         # Create fresh directory
         os.makedirs(prod_path, exist_ok=True)
         
-        # Copy the entire model directory
-        for item in os.listdir(model_path):
-            s = os.path.join(model_path, item)
-            d = os.path.join(prod_path, item)
-            if os.path.isfile(s):
-                with open(s, 'rb') as src, open(d, 'wb') as dst:
-                    dst.write(src.read())
-            else:
-                os.makedirs(d, exist_ok=True)
-                for subitem in os.listdir(s):
-                    sub_s = os.path.join(s, subitem)
-                    sub_d = os.path.join(d, subitem)
-                    with open(sub_s, 'rb') as src, open(sub_d, 'wb') as dst:
-                        dst.write(src.read())
+        # Save model to production location
+        mlflow.sklearn.save_model(model, prod_path)
                         
         logger.info(f"Model deployed successfully to {prod_path}")
         return True

@@ -48,124 +48,43 @@ mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 mlflow.set_experiment("document-processing")
 
 def load_best_model():
-    """Load the best model based on weighted score considering clustering metrics and training data size."""
-    temp_dir = None # Initialize temp_dir
+    """Load the model from the shared volume."""
     try:
-        client = mlflow.tracking.MlflowClient()
-        experiment = client.get_experiment_by_name("document-processing")
-        
-        if experiment is None:
-            logger.warning("Experiment 'document-processing' not found, trying to load local model")
-            # Instead of returning local model directly here, raise an error to trigger fallback in lifespan
-            raise ModelLoadError("MLflow experiment not found")
+        # Check if model exists in shared volume
+        model_path = "/app/models"
+        if not os.path.exists(model_path):
+            logger.warning("Model directory not found at /app/models")
+            raise ModelLoadError("Model directory not found")
             
-        # Get all runs and calculate weighted scores
-        runs = client.search_runs(
-            experiment_ids=[experiment.experiment_id],
-            filter_string="tags.mlflow.runName = 'model_evaluation'"
-        )
-        
-        if not runs:
-            logger.warning("No model runs found, trying to load local model")
-            # Instead of returning local model directly here, raise an error to trigger fallback in lifespan
-            raise ModelLoadError("No valid model runs found in MLflow")
-            
-        # Calculate weighted scores for each run
-        best_score = -float('inf')
-        best_run = None
-        
-        for run in runs:
-            metrics = run.data.metrics
-            
-            # Check if all required metrics exist
-            required_metrics = ['silhouette_score', 'calinski_harabasz_score', 'davies_bouldin_score', 'training_data_size']
-            if not all(metric in metrics for metric in required_metrics):
-                continue
-                
-            # Get training data size
-            training_data_size = float(metrics.get('training_data_size', 0))
-            
-            # Calculate clustering metrics score
-            weights = {
-                'silhouette': 0.5,  # Higher weight for silhouette as it's most important for clustering
-                'calinski': 0.3,
-                'davies': 0.2
-            }
-            
-            # Calculate base score (higher is better for silhouette and calinski, lower is better for davies)
-            # Ensure metrics are floats
-            try:
-                base_score = (
-                    weights['silhouette'] * float(metrics['silhouette_score']) +
-                    weights['calinski'] * float(metrics['calinski_harabasz_score']) +
-                    weights['davies'] * (1 - float(metrics['davies_bouldin_score']))  # Invert davies score
-                )
-            except ValueError:
-                logger.warning(f"Skipping run {run.info.run_id} due to non-numeric metrics.")
-                continue
-            
-            # Calculate data size factor (normalize to 0-1 range)
-            # Assuming 1000 is the baseline
-            data_size_factor = min(training_data_size / 1000.0, 1.0)
-            
-            # Calculate final weighted score
-            final_score = base_score * (0.7 + 0.3 * data_size_factor)
-            
-            if final_score > best_score:
-                best_score = final_score
-                best_run = run
-        
-        if best_run is None:
-            logger.warning("No valid model runs found with required metrics, trying to load local model")
-            # Instead of returning local model directly here, raise an error to trigger fallback in lifespan
-            raise ModelLoadError("No valid model runs found with required metrics in MLflow")
-            
-        # --- Download the model artifact ---  
-        temp_dir = tempfile.mkdtemp() # Create a temporary directory
-        artifact_path = "model" # The artifact path logged in train_model
-        local_path = client.download_artifacts(best_run.info.run_id, artifact_path, dst_path=temp_dir)
-        
-        # Load the model from the downloaded path
-        model = mlflow.sklearn.load_model(local_path)
-        
-        # Log model details
-        logger.info(f"Downloaded and loaded model from run {best_run.info.run_id} to {local_path}")
-        logger.info(f"Training data size: {best_run.data.metrics.get('training_data_size', 0)}")
-        
+        # Load model from shared volume
+        model = mlflow.sklearn.load_model(model_path)
+        logger.info(f"Successfully loaded model from {model_path}")
         return model
         
     except Exception as e:
-        logger.warning(f"Error loading model from MLflow: {str(e)}") # Keep warning, but re-raise to trigger fallback
-        raise ModelLoadError(f"Failed to load model from MLflow: {str(e)}") # Re-raise the exception
-        
-    finally:
-        # Clean up the temporary directory
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir)
-                logger.info(f"Cleaned up temporary directory {temp_dir}")
-            except Exception as cleanup_e:
-                logger.warning(f"Error cleaning up temporary directory {temp_dir}: {str(cleanup_e)}")
+        logger.error(f"Error loading model from shared volume: {str(e)}")
+        raise ModelLoadError(f"Failed to load model from shared volume: {str(e)}")
 
 def load_local_model():
     """Load model from local directory if MLflow is not available."""
     try:
-        local_model_path = "/app/models/local_model.pkl" # Assuming the model is saved as local_model.pkl by Airflow
-        # Check if the model directory exists and contains a file, or if the pkl file exists
+        # First try loading from MLflow model structure in shared volume
+        model_path = "/app/models"
+        if os.path.exists(model_path) and os.path.isdir(model_path):
+            logger.info(f"Loading model from MLflow structure at {model_path}")
+            model = mlflow.sklearn.load_model(model_path)
+            return model
+            
+        # If MLflow structure doesn't exist, try loading from pickle file
+        local_model_path = "/app/models/local_model.pkl"
         if os.path.exists(local_model_path) and os.path.isfile(local_model_path):
-            logger.info(f"Loading model from local file {local_model_path}")
+            logger.info(f"Loading model from pickle file {local_model_path}")
             with open(local_model_path, 'rb') as f:
                 model = pickle.load(f)
             return model
-        elif os.path.exists("/app/models") and os.path.isdir("/app/models") and any(os.path.isfile(os.path.join("/app/models", f)) for f in os.listdir("/app/models")):
-            # If /app/models exists and contains files, it might be the MLflow saved model structure
-            mlflow_local_path = "/app/models" # Assuming the entire MLflow model structure is copied here
-            logger.info(f"Loading model from local MLflow structure at {mlflow_local_path}")
-            model = mlflow.sklearn.load_model(mlflow_local_path)
-            return model
-        else:
-            logger.warning("No local model found at expected locations (/app/models/local_model.pkl or /app/models)")
-            raise ModelLoadError("No model available locally")
+            
+        logger.warning("No model found in expected locations (/app/models or /app/models/local_model.pkl)")
+        raise ModelLoadError("No model available locally")
     except Exception as e:
         logger.error(f"Error loading local model: {str(e)}")
         raise ModelLoadError(f"Failed to load local model: {str(e)}")
@@ -186,18 +105,18 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up the application...")
     try:
-        # First, try loading the local model
-        model = load_local_model()
-        logger.info("Local model loaded successfully")
+        # First, try loading the model from MLflow
+        model = load_best_model()
+        logger.info("MLflow model loaded successfully")
     except Exception as e:
-        logger.warning(f"Failed to load local model: {str(e)}")
-        # If local model fails, try loading from MLflow as a fallback
+        logger.warning(f"Failed to load model from MLflow: {str(e)}")
+        # If MLflow fails, try loading local model as fallback
         try:
-            model = load_best_model()
-            logger.info("MLflow model loaded successfully")
-        except Exception as mlflow_e:
-            logger.error(f"Failed to load model from MLflow: {str(mlflow_e)}")
-            model = None # Ensure model is None if both fail
+            model = load_local_model()
+            logger.info("Local model loaded successfully")
+        except Exception as local_e:
+            logger.error(f"Failed to load local model: {str(local_e)}")
+            model = None  # Ensure model is None if both fail
     yield
     # Shutdown
     logger.info("Shutting down the application...")
@@ -241,7 +160,7 @@ def health_check():
     try:
         # Check MLflow connection
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         try:
             # Try to get experiment instead of list_experiments
             experiment = client.get_experiment_by_name("document-processing")
