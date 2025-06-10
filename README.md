@@ -1,121 +1,143 @@
-# LLMOps Project 
-features:
-- [`FastAPI`](https://fastapi.tiangolo.com/) for serving the model
-- [`Langgraph`](https://www.langchain.com/langgraph) for agentic ai building
-- [`uv`](https://docs.astral.sh/uv/) package manager
-- [`ruff`](https://docs.astral.sh/ruff/) for linting and formatting
-- [`pytest`](https://docs.pytest.org/en/stable/) for testing
-- [`loguru`](https://loguru.readthedocs.io/en/stable/) for logging
-- [`Docker`](https://www.docker.com/) for containerization
+# Ngumpulin Backend - LLMOps Platform
 
-## Install
+## Fitur Utama
+- [`FastAPI`](https://fastapi.tiangolo.com/) untuk API dan backend
+- [`LangGraph`](https://github.com/langchain-ai/langgraph) untuk agentic workflow LLM
+- [`Airflow`](https://airflow.apache.org/) untuk workflow ML pipeline
+- [`MLflow`](https://mlflow.org/) untuk tracking experiment
+- [`Prometheus`](https://prometheus.io/) & [`Grafana`](https://grafana.com/) untuk monitoring
+- [`Docker Compose`](https://docs.docker.com/compose/) untuk orkestrasi multi-service
+- [`uv`](https://docs.astral.sh/uv/) untuk manajemen environment Python
 
-Make sure you have [`uv` installed](https://docs.astral.sh/uv/getting-started/installation/).
+## Struktur Project
 
-Clone the repository:
+- `app/` : Source code FastAPI (API, core, routers, utils)
+- `airflow/` : Konfigurasi, DAG, dan plugin Airflow
+- `mlflow/` : Konfigurasi MLflow
+- `monitoring/` : Konfigurasi Prometheus & Grafana
+- `notebook/` : Notebook eksperimen
+- `scripts/` : Script setup, backup, entrypoint, dsb
+- `docker-compose.yaml` : Orkestrasi seluruh service
+- `Dockerfile.*` : Dockerfile untuk masing-masing service
+- `.env` : Environment variable (jangan commit ke repo publik)
 
-```bash
-git clone git@github.com:mlexpertio/ml-project-template.git .
-cd ml-project-template
-```
+## Prasyarat
+- Sudah install [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+- Sudah install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows: gunakan PowerShell)
 
-Install Python:
+## Instalasi & Setup (Local)
 
-```bash
+```powershell
+# Clone repository
+git clone https://github.com/yourusername/ngumpulin-backend.git
+cd ngumpulin-backend
+
+# Setup Python (opsional, untuk development)
 uv python install 3.12.8
-```
-
-Create and activate a virtual environment:
-
-```bash
 uv venv
-source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
+.venv\Scripts\Activate.ps1
 uv sync
-```
-
-Install package in editable mode:
-
-```bash
 uv pip install -e .
-```
-
-Install pre-commit hooks:
-
-```bash
 uv run pre-commit install
+
+# Copy dan edit file .env
+cp .env.example .env
+# Edit .env sesuai kebutuhan
+
+# Build & start semua service (FastAPI, Airflow, MLflow, monitoring, dsb)
+docker compose up --build -d
+
+# Cek status service
+docker compose ps
 ```
 
-## Reproduce
+## Akses Service
+- FastAPI: [http://localhost:8000](http://localhost:8000)
+- MLflow: [http://localhost:5000](http://localhost:5000)
+- Airflow: [http://localhost:8080](http://localhost:8080) (user: admin/admin)
+- Adminer: [http://localhost:8088](http://localhost:8088)
+- Prometheus: [http://localhost:9090](http://localhost:9090)
+- Grafana: [http://localhost:3030](http://localhost:3030) (user: admin/admin)
 
-The project contains three different stages defined in `dvc.yaml`.
+## Pengujian
 
-- Create a dataset from the raw data:
-
-```bash
-uv run dvc repro build-dataset
-```
-
-- Train a model using the dataset:
-
-```bash
-uv run dvc repro train-model
-```
-
-- Evaluate the model using the test dataset:
-
-```bash
-uv run dvc repro evaluate
-```
-
-## API server
-
-Start the FastAPI server:
-
-```bash
-uv run python app.py
-```
-
-Test the API:
-
-```bash
-curl -X POST "http://localhost:8000/predict" \
-     -H "Content-Type: application/json" \
-     -d '{"text": "lets launch now"}'
-```
-
-## Tests
-
-```bash
+```powershell
 uv run pytest
 ```
 
-## Docker
+## Penggunaan API
 
-The template includes a `Dockerfile` to build a Docker image:
-
-```bash
-docker build -t prophet:latest .
+### Health check
+```powershell
+Invoke-WebRequest http://localhost:8000/health
 ```
 
-Run the Docker container:
-
-```bash
-docker run -d -p 8000:8000 --name prophet prophet:latest
+### Upload file assignment
+```powershell
+Invoke-RestMethod -Uri http://localhost:8000/upload -Method Post -Form @{uuid='123'; file_url='https://...' }
 ```
 
-uv init --app
+### Generate Assignment Feedback (LangGraph Agent)
+Endpoint ini menggunakan LangGraph untuk menghasilkan feedback assignment berbasis LLM.
 
-uv add fastapi --extra standard
+**Endpoint:**
+```
+POST /feedback
+```
 
-.venv\Scripts\activate
+**Contoh payload:**
+```json
+{
+  "title": "Tugas Matematika Integral",
+  "description": "Kerjakan soal integral berikut dengan metode substitusi.",
+  "content": "\n\nSoal: ∫2x dx\nJawaban: ...",
+  "persona": "Berikan feedback dengan gaya ramah dan membangun."
+}
+```
 
-uv add gliner
+**Contoh request (PowerShell):**
+```powershell
+$body = @{ 
+  title = 'Tugas Matematika Integral';
+  description = 'Kerjakan soal integral berikut dengan metode substitusi.';
+  content = 'Soal: ∫2x dx
+Jawaban: ...';
+  persona = 'Berikan feedback dengan gaya ramah dan membangun.'
+} | ConvertTo-Json
 
-uv add supabase langchain langchain-pinecone scikit-learn numpy langchain-community langgraph langchain-groq
+Invoke-RestMethod -Uri http://localhost:8000/feedback -Method Post -Body $body -ContentType 'application/json'
+```
 
-uv run fastapi dev
+**Contoh response:**
+```json
+{
+  "summary": "Ringkasan isi assignment ...",
+  "relevance_analysis": "Analisis relevansi judul dan deskripsi ...",
+  "feedback_analysis": "Feedback akademik ...",
+  "personalized_feedback": "Feedback yang dipersonalisasi ...",
+  "combined_output": "🎓 Final Personalized Feedback: ..."
+}
+```
+
+Endpoint ini akan mengembalikan feedback assignment yang sudah dianalisis dan dipersonalisasi oleh LLM agent berbasis LangGraph.
+
+## Deployment ke VPS/GCP
+
+1. Deploy VM (Ubuntu) di GCP Compute Engine
+2. Install Docker & Docker Compose di VM
+3. Clone repo & copy `.env` ke VM
+4. Jalankan:
+   ```bash
+   docker compose up --build -d
+   ```
+5. (Opsional) Setup Nginx reverse proxy & SSL untuk domain
+
+## Backup & Maintenance
+
+- Backup: jalankan `scripts/backup.sh`
+- Cleanup: jalankan `scripts/cleanup.sh`
+- Restore: manual dari hasil backup
+
+---
+
+> Project ini dikembangkan untuk workflow LLMOps/ML pipeline modern, siap untuk deployment di cloud maupun VPS.
