@@ -1,6 +1,21 @@
-# Ngumpulin Backend - LLMOps Platform
+<h1 align="center">Ngumpulin Backend - LLMOps+MLOps Platform</h1>
 
-## Fitur Utama
+<p align="center">
+  <a href="https://github.com/wahyudesu/ngumpulin-backend">
+    <img src="https://img.shields.io/github/last-commit/wahyudesu/ngumpulin-backend?style=flat-square" alt="Last Commit">
+  </a>
+  <a href="https://github.com/wahyudesu/ngumpulin-backend">
+    <img src="https://img.shields.io/github/languages/top/wahyudesu/ngumpulin-backend?style=flat-square" alt="Top Language">
+  </a>
+  <a href="https://github.com/wahyudesu/ngumpulin-backend">
+    <img src="https://img.shields.io/github/languages/count/wahyudesu/ngumpulin-backend?style=flat-square" alt="Languages Count">
+  </a>
+  <a href="https://github.com/wahyudesu/ngumpulin-backend">
+    <img src="https://img.shields.io/github/repo-size/wahyudesu/ngumpulin-backend?style=flat-square" alt="Repo Size">
+  </a>
+</p>
+
+## Feature
 - [`FastAPI`](https://fastapi.tiangolo.com/) untuk API dan backend
 - [`LangGraph`](https://github.com/langchain-ai/langgraph) untuk agentic workflow LLM
 - [`Airflow`](https://airflow.apache.org/) untuk workflow ML pipeline
