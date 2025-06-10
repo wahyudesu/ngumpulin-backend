@@ -1,4 +1,4 @@
-<h1 align="center">Ngumpulin Backend - LLMOps+MLOps Platform</h1>
+<h1 align="center">Ngumpulin Backend - Fastapi LLMOps+MLOps Project</h1>
 
 <p align="center">
   <a href="https://github.com/wahyudesu/ngumpulin-backend">
