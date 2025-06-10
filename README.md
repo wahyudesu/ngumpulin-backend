@@ -34,7 +34,7 @@
 - `scripts/` : Script setup, backup, entrypoint, dsb
 - `docker-compose.yaml` : Orkestrasi seluruh service
 - `Dockerfile.*` : Dockerfile untuk masing-masing service
-- `.env` : Environment variable (jangan commit ke repo publik)
+- `.env` : Environment variable 
 
 ## Prasyarat
 - Sudah install [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
@@ -44,16 +44,13 @@
 
 ```powershell
 # Clone repository
-git clone https://github.com/yourusername/ngumpulin-backend.git
+git clone https://github.com/wahyudesu/ngumpulin-backend.git
 cd ngumpulin-backend
 
 # Setup Python (opsional, untuk development)
-uv python install 3.12.8
 uv venv
-.venv\Scripts\Activate.ps1
+.venv\Scripts\activate
 uv sync
-uv pip install -e .
-uv run pre-commit install
 
 # Copy dan edit file .env
 cp .env.example .env
